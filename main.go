@@ -56,7 +56,7 @@ const (
 	idOffset       = 0
 	usernameOffset = idOffset + 4
 	emailOffset    = usernameOffset + 32
-	rowSize        = emailOffset + 255
+	rowSize        = emailOffset + 369
 	pageSize       = 4096
 	rowsPerPage    = pageSize / rowSize
 	tableMaxRows   = rowsPerPage * 100
@@ -131,17 +131,10 @@ func serializeRow(source *Row, destination []byte) {
 func deserializeRow(source []byte, destination *Row) {
 	// Deserialize row
 	// source, destination
-	row := &Row{}
-	gob.Register(row)
-	gob.Register(source)
-	gob.Register(destination)
 	buffer := bytes.NewBuffer(source)
 	decoder := gob.NewDecoder(buffer)
 
-	fmt.Println(source)
-	err := decoder.Decode(&row)
-	fmt.Println(row)
-	fmt.Println(destination)
+	err := decoder.Decode(&destination)
 	if err != nil {
 		fmt.Println("Error de-serialising row")
 		fmt.Println(err)
