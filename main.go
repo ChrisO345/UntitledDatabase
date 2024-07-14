@@ -6,7 +6,24 @@ import (
 	"encoding/gob"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+)
+
+const (
+	columnUsernameSize = 32
+	columnEmailSize    = 255
+	idSize             = 4
+	usernameSize       = 32
+	emailSize          = 369
+	idOffset           = 0
+	usernameOffset     = idOffset + idSize
+	emailOffset        = usernameOffset + usernameSize
+	rowSize            = emailOffset + emailSize
+	pageSize           = 4096
+	tableMaxPages      = 100
+	rowsPerPage        = pageSize / rowSize
+	tableMaxRows       = rowsPerPage * tableMaxPages
 )
 
 // MetaCommandResult Enum definition
@@ -30,6 +47,8 @@ type PrepareCommandResult int
 
 const (
 	PrepareSuccess = PrepareCommandResult(iota)
+	PrepareStringTooLong
+	PrepareNegativeId
 	PrepareSyntaxError
 	PrepareUnrecognizedStatement
 )
@@ -43,8 +62,8 @@ const (
 
 type Row struct {
 	Id       int32
-	Username [32]byte
-	Email    [255]byte
+	Username [columnUsernameSize]byte
+	Email    [columnEmailSize]byte
 }
 
 type Statement struct {
@@ -52,49 +71,58 @@ type Statement struct {
 	rowToInsert   Row // Only used by insert statement
 }
 
-const (
-	idOffset       = 0
-	usernameOffset = idOffset + 4
-	emailOffset    = usernameOffset + 32
-	rowSize        = emailOffset + 369
-	pageSize       = 4096
-	rowsPerPage    = pageSize / rowSize
-	tableMaxRows   = rowsPerPage * 100
-)
-
 type Table struct {
 	numRows uint32
-	pages   [100][]byte
+	pages   [tableMaxPages][]byte
 }
 
 // I think that there is an issue with this
 func newTable() *Table {
 	table := Table{numRows: 0}
-	for i := 0; i < 100; i++ {
+	for i := 0; i < tableMaxPages; i++ {
 		table.pages[i] = nil
 	}
 	return &table
 }
 
+func prepareInsert(input string, statement *Statement) PrepareCommandResult {
+	statement.statementType = StatementInsert
+
+	argsAssigned := strings.Split(input, " ")
+
+	if len(argsAssigned) != 4 {
+		fmt.Println("Error parsing input")
+		return PrepareSyntaxError
+	}
+
+	id, err := strconv.Atoi(argsAssigned[1])
+	if err != nil {
+		fmt.Println("Error parsing ID")
+		return PrepareSyntaxError
+	}
+
+	if id < 0 {
+		return PrepareNegativeId
+	}
+
+	if len(argsAssigned[2]) > columnUsernameSize {
+		return PrepareStringTooLong
+	}
+
+	if len(argsAssigned[2]) > columnEmailSize {
+		return PrepareStringTooLong
+	}
+
+	statement.rowToInsert.Id = int32(id)
+	copy(statement.rowToInsert.Username[:], argsAssigned[2])
+	copy(statement.rowToInsert.Email[:], argsAssigned[3])
+
+	return PrepareSuccess
+}
+
 func handlePrepareStatements(input string, statement *Statement) PrepareCommandResult {
 	if strings.HasPrefix(input, "insert") {
-		statement.statementType = StatementInsert
-		var (
-			username string
-			email    string
-		)
-		argsAssigned, err := fmt.Sscanf(input, "insert %d %s %s", &statement.rowToInsert.Id,
-			&username, &email)
-		copy(statement.rowToInsert.Username[:], username)
-		copy(statement.rowToInsert.Email[:], email)
-		if err != nil {
-			fmt.Println("Error parsing input")
-			return PrepareSyntaxError
-		}
-		if argsAssigned < 3 {
-			return PrepareSyntaxError
-		}
-		return PrepareSuccess
+		return prepareInsert(input, statement)
 	}
 	if strings.HasPrefix(input, "select") {
 		statement.statementType = StatementSelect
@@ -223,6 +251,12 @@ func main() {
 		switch handlePrepareStatements(input, &statement) {
 		case PrepareSuccess:
 			break
+		case PrepareStringTooLong:
+			fmt.Println("String is too long")
+			continue
+		case PrepareNegativeId:
+			fmt.Println("ID must be positive")
+			continue
 		case PrepareSyntaxError:
 			fmt.Println("Syntax error. Could not parse statement.")
 			continue
