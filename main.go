@@ -34,9 +34,10 @@ const (
 	MetaCommandUnrecognizedCommand
 )
 
-func handleMetaCommands(input string) MetaCommandResult {
+func handleMetaCommands(input string, table *Table) MetaCommandResult {
 	input = strings.TrimPrefix(input, ".")
 	if input == "exit" {
+		dbClose(table)
 		os.Exit(0)
 	}
 	return MetaCommandUnrecognizedCommand
@@ -71,18 +72,124 @@ type Statement struct {
 	rowToInsert   Row // Only used by insert statement
 }
 
-type Table struct {
-	numRows uint32
-	pages   [tableMaxPages][]byte
+type Pager struct {
+	file       *os.File
+	fileLength int64
+	pages      [tableMaxPages][]byte
 }
 
-// I think that there is an issue with this
-func newTable() *Table {
-	table := Table{numRows: 0}
-	for i := 0; i < tableMaxPages; i++ {
-		table.pages[i] = nil
+type Table struct {
+	numRows uint32
+	pager   *Pager
+}
+
+func pagerOpen(filename string) *Pager {
+	content, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0644)
+
+	if err != nil {
+		fmt.Println("Error opening file")
+		os.Exit(1)
 	}
+
+	fi, err := content.Stat()
+	if err != nil {
+		fmt.Println("Error getting file info")
+		os.Exit(1)
+	}
+
+	fileLength := fi.Size()
+
+	pager := &Pager{}
+	pager.fileLength = fileLength
+	pager.file = content
+
+	for i := 0; i < tableMaxPages; i++ {
+		pager.pages[i] = nil
+	}
+
+	return pager
+}
+
+func dbOpen(filename string) *Table {
+	// Opens database file
+	// Initializes the pager data structure
+	// Initializes the table data structure
+	pager := pagerOpen(filename)
+	numRows := pager.fileLength / rowSize
+
+	table := Table{numRows: 0}
+	table.pager = pager
+	table.numRows = uint32(numRows)
+
 	return &table
+}
+
+func pagerFlush(pager *Pager, pageIndex uint32, size uint32) {
+	if pager.pages[pageIndex] == nil {
+		fmt.Println("Tried to flush null page")
+		os.Exit(1)
+	}
+
+	//offset := pageIndex * pageSize
+	//_, err := pager.file.WriteAt(pager.pages[pageIndex], int64(offset))
+	//_, err := pager.file.Write(pager.pages[pageIndex][:size])
+	_, err := pager.file.Write(pager.pages[pageIndex][:size])
+	if err != nil {
+		fmt.Println("Error writing to disk")
+		os.Exit(1)
+	}
+}
+
+func dbClose(table *Table) {
+	// Close the file
+	// Free the pager
+	// Free the table
+	pager := table.pager
+	numFullPages := table.numRows / rowsPerPage
+
+	err := pager.file.Truncate(0)
+
+	if err != nil {
+		fmt.Println("Error truncating file")
+		os.Exit(1)
+	}
+
+	_, err = pager.file.Seek(0, 0)
+	if err != nil {
+		fmt.Println("Error seeking file")
+		os.Exit(1)
+	}
+
+	var i uint32
+	for i = 0; i < numFullPages; i++ {
+		if pager.pages[i] == nil {
+			continue
+		}
+		// Flush page to disk
+		// Free page from memory
+		pagerFlush(pager, i, pageSize)
+		pager.pages[i] = nil
+	}
+
+	numAdditionalRows := table.numRows % rowsPerPage
+	if numAdditionalRows > 0 {
+		pageNum := numFullPages
+		if pager.pages[pageNum] != nil {
+			pagerFlush(pager, pageNum, numAdditionalRows*rowSize)
+			pager.pages[pageNum] = nil
+		}
+	}
+
+	err = pager.file.Close()
+
+	if err != nil {
+		fmt.Println("Error closing db file")
+		os.Exit(1)
+	}
+
+	for i = 0; i < tableMaxPages; i++ {
+		pager.pages[i] = nil
+	}
 }
 
 func prepareInsert(input string, statement *Statement) PrepareCommandResult {
@@ -170,17 +277,44 @@ func deserializeRow(source []byte, destination *Row) {
 	}
 }
 
+func getPage(pager *Pager, pageIndex uint32) []byte {
+	if pageIndex > tableMaxPages {
+		fmt.Printf("Tried to fetch page number out of bounds. %d > %d\n", pageIndex, tableMaxPages)
+		os.Exit(1)
+	}
+
+	if pager.pages[pageIndex] == nil {
+		// Allocate memory for page
+		pager.pages[pageIndex] = make([]byte, pageSize)
+
+		if pager.fileLength > 0 {
+			// Read in page
+			_, err := pager.file.Read(pager.pages[pageIndex])
+
+			if err != nil {
+				fmt.Println("Error reading file")
+				fmt.Println(err)
+				os.Exit(1)
+			}
+		}
+	}
+
+	return pager.pages[pageIndex]
+}
+
 func rowSlot(table *Table, rowNum uint32) []byte {
 	pageIndex := rowNum / rowsPerPage
 
 	// Get Current Page from index
-	page := table.pages[pageIndex]
+	//page := table.pages[pageIndex]
+	//
+	//if page == nil {
+	//	// Allocate memory for page
+	//	page = make([]byte, pageSize)
+	//	table.pages[pageIndex] = page
+	//}
 
-	if page == nil {
-		// Allocate memory for page
-		page = make([]byte, pageSize)
-		table.pages[pageIndex] = page
-	}
+	page := getPage(table.pager, pageIndex)
 
 	rowOffset := rowNum % rowsPerPage
 	byteOffset := rowOffset * rowSize
@@ -228,8 +362,12 @@ func executeStatement(statement *Statement, table *Table) ExecuteCommandResult {
 
 func main() {
 	fmt.Println("Untitled Database Project")
-
-	table := newTable()
+	if len(os.Args) < 2 {
+		fmt.Println("Must supply a database filename.")
+		os.Exit(1)
+	}
+	filename := os.Args[1]
+	table := dbOpen(filename)
 	stdin := bufio.NewReader(os.Stdin)
 
 	for {
@@ -237,7 +375,7 @@ func main() {
 		input := readInput(stdin)
 
 		if strings.HasPrefix(input, ".") {
-			switch handleMetaCommands(input) {
+			switch handleMetaCommands(input, table) {
 			case MetaCommandSuccess:
 				continue
 			case MetaCommandUnrecognizedCommand:
