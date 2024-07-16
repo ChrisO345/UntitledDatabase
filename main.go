@@ -83,6 +83,12 @@ type Table struct {
 	pager   *Pager
 }
 
+type Cursor struct {
+	table      *Table
+	rowNum     uint32
+	endOfTable bool // Indicates the position one after the last row in the table
+}
+
 func pagerOpen(filename string) *Pager {
 	content, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0644)
 
@@ -302,17 +308,18 @@ func getPage(pager *Pager, pageIndex uint32) []byte {
 	return pager.pages[pageIndex]
 }
 
+func cursorValue(cursor *Cursor) []byte {
+	pageIndex := cursor.rowNum / rowsPerPage
+	page := getPage(cursor.table.pager, pageIndex)
+
+	rowOffset := cursor.rowNum % rowsPerPage
+	byteOffset := rowOffset * rowSize
+	result := page[byteOffset : byteOffset+rowSize]
+	return result
+}
+
 func rowSlot(table *Table, rowNum uint32) []byte {
 	pageIndex := rowNum / rowsPerPage
-
-	// Get Current Page from index
-	//page := table.pages[pageIndex]
-	//
-	//if page == nil {
-	//	// Allocate memory for page
-	//	page = make([]byte, pageSize)
-	//	table.pages[pageIndex] = page
-	//}
 
 	page := getPage(table.pager, pageIndex)
 
@@ -328,7 +335,9 @@ func executeInsert(statement *Statement, table *Table) ExecuteCommandResult {
 	}
 
 	rowToInsert := &statement.rowToInsert
-	serializeRow(rowToInsert, rowSlot(table, table.numRows))
+	cursor := tableEnd(table)
+
+	serializeRow(rowToInsert, cursorValue(cursor))
 	// Serialize row (source, destination)
 	// rowToInsert, rowSlot(table, table.numRows) -> Buffer?? pointer
 
@@ -340,12 +349,15 @@ func printRow(row *Row) {
 	fmt.Printf("(%d, %s, %s)\n", row.Id, row.Username, row.Email)
 }
 
-func executeSelect(statement *Statement, table *Table) ExecuteCommandResult {
+func executeSelect(table *Table) ExecuteCommandResult {
+	cursor := tableStart(table)
+
 	var row Row
-	var i uint32
-	for i = 0; i < table.numRows; i++ {
-		deserializeRow(rowSlot(table, i), &row)
+
+	for !cursor.endOfTable {
+		deserializeRow(cursorValue(cursor), &row)
 		printRow(&row)
+		advanceCursorPosition(cursor)
 	}
 	return ExecuteSuccess
 }
@@ -355,9 +367,29 @@ func executeStatement(statement *Statement, table *Table) ExecuteCommandResult {
 	case StatementInsert:
 		return executeInsert(statement, table)
 	case StatementSelect:
-		return executeSelect(statement, table)
+		return executeSelect(table)
 	}
 	return ExecuteTableFull
+}
+
+func tableStart(table *Table) *Cursor {
+	cursor := Cursor{table: table, rowNum: 0, endOfTable: table.numRows == 0}
+
+	return &cursor
+}
+
+func tableEnd(table *Table) *Cursor {
+	cursor := Cursor{table: table, rowNum: table.numRows, endOfTable: true}
+
+	return &cursor
+}
+
+func advanceCursorPosition(cursor *Cursor) {
+	cursor.rowNum++
+
+	if cursor.rowNum >= cursor.table.numRows {
+		cursor.endOfTable = true
+	}
 }
 
 func main() {
